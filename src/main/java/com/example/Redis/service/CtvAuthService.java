@@ -6,18 +6,20 @@ import com.example.Redis.dto.CtvOtpSession;
 import com.example.Redis.dto.CtvOtpVerifyRequest;
 import com.example.Redis.dto.SendOtpReq;
 import com.example.Redis.entity.HrmDataEntity;
+import com.example.Redis.handle.BusinessException;
+import com.example.Redis.handle.ErrorCode;
 import com.example.Redis.repository.HrmDataRepository;
 import com.example.Redis.util.Util;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
+import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -29,40 +31,49 @@ public class CtvAuthService {
     private final Util util;
     private final HrmDataRepository hrmDataRepository;
     private static final String OTP_KEY_PREFIX = "ctv:otp:";
+    private static final String OTP_RATE_PHONE_PREFIX = "ctv:otp:rate:phone";
     private final RedisTemplate<String, Object> redisTemplate;
 
 
-    public ResponseEntity<?> sendOtp(SendOtpReq req){
-        HrmDataEntity ctv = hrmDataRepository.findByPhone(req.getPhone());
+    public CtvOtpResponse sendOtp(SendOtpReq req){
+        HrmDataEntity ctv = hrmDataRepository.findByPhone(req.getPhone())
+                .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_PHONE));
         String normalizedPhone = util.fmNumber(req.getPhone());
         String otp = Util.getOTP();
         CtvOtpSession session = buildSession(ctv, req.getDeviceId(), req.getChannel(), normalizedPhone, otp, 0);
+        validateLimit(normalizedPhone);
         saveSession(session);
-        CtvOtpResponse ctvOtpResponse = CtvOtpResponse.builder()
+        return CtvOtpResponse.builder()
                 .otpRequestId(session.getOtpRequestId())
                 .expiredIn(config.getOtpExpireSeconds())
                 .resendIn(config.getOtpResendAfterSeconds())
                 .maskedPhone(normalizedPhone)
                 .note( config.isSkipPartnerValidation() ? otp : "" )
                 .build();
-       return ResponseEntity.ok(ctvOtpResponse);
     }
 
-    public ResponseEntity<?> verifyOtp(CtvOtpVerifyRequest request){
-        HrmDataEntity ctv = hrmDataRepository.findByPhone(request.getPhone());
+    public HrmDataEntity verifyOtp(CtvOtpVerifyRequest request){
+        HrmDataEntity ctv = hrmDataRepository.findByPhone(request.getPhone())
+                .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_PHONE));
         String normalizedPhone = util.fmNumber(request.getPhone());
-        CtvOtpSession session = getSession(request.getOtpRequestId());
+        CtvOtpSession session = getSession(request.getOtpRequestId());  // Lấy từ redis ra
+        if (!request.getOtp().equals(session.getOtpHash()) ||
+                !request.getDeviceId().equals(session.getDeviceId()) ||
+                !session.getPhone().equals(normalizedPhone)
+        ) {
+            throw new BusinessException(ErrorCode.INVALID_REQUEST);
+        }
         if (session.getResendCount() >= config.getOtpMaxResend()) {
             deleteSession(session.getOtpRequestId());
         }
-        if (!session.getPhone().equals(normalizedPhone)) {
-            throw new RuntimeException("Sai sdt");
-        }
-        if (!request.getOtp().equals(session.getOtpRequestId())) {
-            throw new RuntimeException("Otp khong dung");
-        }
-        return  ResponseEntity.ok(ctv);
+        deleteSession(request.getOtpRequestId()); // Xoá khỏi redis
+
+        return ctv;
    }
+
+    public CtvOtpResponse reSendOtp(){
+        return null;
+    }
 
     private CtvOtpSession buildSession(HrmDataEntity ctv,
                                        String deviceId,
@@ -92,7 +103,29 @@ public class CtvAuthService {
     }
 
     private CtvOtpSession getSession(String otpRequestId){
-        return (CtvOtpSession) (redisTemplate.opsForValue().get(OTP_KEY_PREFIX + otpRequestId));
+        if(!redisTemplate.hasKey(OTP_KEY_PREFIX + otpRequestId)){
+            throw new BusinessException(ErrorCode.INVALID_REQUEST);
+        }
+        String json = (String) redisTemplate.opsForValue().get(OTP_KEY_PREFIX + otpRequestId);
+        return objectMapper.readValue(json, CtvOtpSession.class);
+    }
+
+    private void validateLimit(String phone){
+        if(!config.isRateLimitEnabled()){
+            return;
+        }
+        validateCounter(OTP_RATE_PHONE_PREFIX + phone, config.getOtpRateLimitPerPhone());
+
+    }
+
+    private void validateCounter(String key, int maxCount){
+        Long count = redisTemplate.opsForValue().increment(key);
+        if (count != null && count == 1L){
+            redisTemplate.expire(key, Duration.ofSeconds(config.getOtpRateLimitWindowSeconds()));
+        }
+        if (count != null && count > maxCount){
+            throw new BusinessException(ErrorCode.OTP_LIMIT_EXCEEDED);
+        }
     }
 
     private void deleteSession(String otpRequestId){
