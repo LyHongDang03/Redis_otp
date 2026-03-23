@@ -19,7 +19,6 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
-import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -66,7 +65,7 @@ public class CtvAuthService {
         if (session.getResendCount() >= config.getOtpMaxResend()) {
             deleteSession(session.getOtpRequestId());
         }
-        deleteSession(request.getOtpRequestId()); // Xoá khỏi redis
+        deleteSession(request.getOtpRequestId());
 
         return ctv;
    }
@@ -89,7 +88,7 @@ public class CtvAuthService {
         session.setDeviceId(deviceId);
         session.setChannel(channel);
         session.setAttemptCount(0);
-        session.setResendCount(resendCount);
+        session.setResendCount(resendCount + 1);
         session.setOtpHash(otp);
         session.setOtpExpiredAt( Date.from(Instant.now().plusSeconds(config.getOtpExpireSeconds())) );
         return session;
