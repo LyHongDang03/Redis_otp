@@ -9,4 +9,5 @@ import java.util.Optional;
 @Repository
 public interface HrmDataRepository extends JpaRepository<HrmDataEntity, String> {
     Optional<HrmDataEntity> findByPhone(String phone);
+    Optional<HrmDataEntity> findByCode(String code);
 }
