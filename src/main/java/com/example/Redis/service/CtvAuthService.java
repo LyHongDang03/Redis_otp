@@ -1,10 +1,7 @@
 package com.example.Redis.service;
 
 import com.example.Redis.config.CtvAuthConfig;
-import com.example.Redis.dto.CtvOtpResponse;
-import com.example.Redis.dto.CtvOtpSession;
-import com.example.Redis.dto.CtvOtpVerifyRequest;
-import com.example.Redis.dto.SendOtpReq;
+import com.example.Redis.dto.*;
 import com.example.Redis.entity.HrmDataEntity;
 import com.example.Redis.handle.BusinessException;
 import com.example.Redis.handle.ErrorCode;
@@ -19,7 +16,6 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
-import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -39,9 +35,14 @@ public class CtvAuthService {
         HrmDataEntity ctv = hrmDataRepository.findByPhone(req.getPhone())
                 .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_PHONE));
         String normalizedPhone = util.fmNumber(req.getPhone());
-        String otp = Util.getOTP();
-        CtvOtpSession session = buildSession(ctv, req.getDeviceId(), req.getChannel(), normalizedPhone, otp, 0);
         validateLimit(normalizedPhone);
+        String otp = Util.getOTP();
+        CtvOtpSession session = buildSession(ctv,
+                req.getDeviceId(),
+                req.getChannel(),
+                normalizedPhone,
+                otp,
+                0);
         saveSession(session);
         return CtvOtpResponse.builder()
                 .otpRequestId(session.getOtpRequestId())
@@ -61,18 +62,52 @@ public class CtvAuthService {
                 !request.getDeviceId().equals(session.getDeviceId()) ||
                 !session.getPhone().equals(normalizedPhone)
         ) {
+            session.setAttemptCount(session.getAttemptCount() + 1);
+            saveSession(session);
             throw new BusinessException(ErrorCode.INVALID_REQUEST);
         }
+
         if (session.getResendCount() >= config.getOtpMaxResend()) {
             deleteSession(session.getOtpRequestId());
         }
         deleteSession(request.getOtpRequestId()); // Xoá khỏi redis
-
         return ctv;
    }
 
-    public CtvOtpResponse reSendOtp(){
-        return null;
+    public CtvOtpResponse reSendOtp(CtvOtpResendRequest request){
+        String normalizedPhone = util.fmNumber(request.getPhone());
+        CtvOtpSession session = getSession(request.getOtpRequestId());
+        if (!request.getDeviceId().equals(session.getDeviceId()) ||
+                !session.getPhone().equals(normalizedPhone)){
+            throw new BusinessException(ErrorCode.INVALID_REQUEST);
+        }
+        if (session.getResendCount() >= config.getOtpMaxResend()) {
+            deleteSession(session.getOtpRequestId());
+            throw new BusinessException(ErrorCode.INVALID_REQUEST);
+        }
+        if (session.getOtpExpiredAt().toInstant().isAfter(Instant.now())) {
+            session.setResendCount(session.getResendCount() + 1);
+            throw new BusinessException(ErrorCode.INVALID_RESEND);
+        }
+        HrmDataEntity ctv = hrmDataRepository.findByCode(session.getCtvCode()).orElseThrow();
+        String otp = Util.getOTP();
+        CtvOtpSession newSession = buildSession(
+                ctv,
+                request.getDeviceId(),
+                session.getChannel(),
+                normalizedPhone,
+                otp,
+                session.getResendCount() + 1
+        );
+        deleteSession(session.getOtpRequestId());
+        saveSession(newSession);
+        return CtvOtpResponse.builder()
+                .otpRequestId(newSession.getOtpRequestId())
+                .expiredIn(config.getOtpExpireSeconds())
+                .resendIn(config.getOtpResendAfterSeconds())
+                .maskedPhone(normalizedPhone)
+                .note( config.isSkipPartnerValidation() ? otp : "" )
+                .build();
     }
 
     private CtvOtpSession buildSession(HrmDataEntity ctv,
@@ -91,7 +126,7 @@ public class CtvAuthService {
         session.setAttemptCount(0);
         session.setResendCount(resendCount);
         session.setOtpHash(otp);
-        session.setOtpExpiredAt( Date.from(Instant.now().plusSeconds(config.getOtpExpireSeconds())) );
+        session.setOtpExpiredAt(Date.from(Instant.now().plusSeconds(config.getOtpExpireSeconds())));
         return session;
     }
 
@@ -104,7 +139,7 @@ public class CtvAuthService {
 
     private CtvOtpSession getSession(String otpRequestId){
         if(!redisTemplate.hasKey(OTP_KEY_PREFIX + otpRequestId)){
-            throw new BusinessException(ErrorCode.INVALID_REQUEST);
+            throw new BusinessException(ErrorCode.INVALID_REDIS);
         }
         String json = (String) redisTemplate.opsForValue().get(OTP_KEY_PREFIX + otpRequestId);
         return objectMapper.readValue(json, CtvOtpSession.class);
