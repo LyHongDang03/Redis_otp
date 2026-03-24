@@ -124,7 +124,7 @@ public class CtvAuthService {
         session.setDeviceId(deviceId);
         session.setChannel(channel);
         session.setAttemptCount(0);
-        session.setResendCount(resendCount);
+        session.setResendCount(resendCount + 1);
         session.setOtpHash(otp);
         session.setOtpExpiredAt(Date.from(Instant.now().plusSeconds(config.getOtpExpireSeconds())));
         return session;
